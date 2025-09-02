@@ -26,7 +26,7 @@ def load_data():
             schema=st.secrets["snowflake"]["schema"]
         )
         # ---- CHANGE THIS TO YOUR TABLE NAME ----
-        sql = "SELECT * FROM Supplier"
+        sql = "SELECT * FROM Final"
         df_pd = pd.read_sql(sql, conn)
         conn.close()
 
@@ -168,6 +168,7 @@ if filtered_df.shape[0] > 0:
     )
 else:
     st.info("No data to export. Please adjust your filters or search.")
+
 
 
 
