@@ -2,6 +2,7 @@ import streamlit as st
 import polars as pl
 import pandas as pd
 import io
+import snowflake.connector
 
 st.set_page_config(layout="wide")
 
@@ -16,17 +17,33 @@ def clean_string(s):
 
 @st.cache_data
 def load_data():
-    try:
-        df = pl.read_excel("excel.xlsx")  # <-- Change to your file name
+    conn = snowflake.connector.connect(
+            user=st.secrets["snowflake"]["user"],
+            password=st.secrets["snowflake"]["password"],
+            account=st.secrets["snowflake"]["account"],
+            warehouse=st.secrets["snowflake"]["warehouse"],
+            database=st.secrets["snowflake"]["database"],
+            schema=st.secrets["snowflake"]["schema"]
+        )
+        # ---- CHANGE THIS TO YOUR TABLE NAME ----
+        sql = "SELECT * FROM Supplier"
+        df_pd = pd.read_sql(sql, conn)
+        conn.close()
+
+        df = pl.from_pandas(df_pd)
         # Clean column names
         df = df.rename({col: col.strip().replace("/", "_").replace(" ", "_") for col in df.columns})
         # Precompute a single search_blob column for fast searching (only ONCE!)
         df = df.with_columns([pl.col(col).cast(pl.Utf8).alias(col) for col in df.columns])
+        # Add "Concat" column if not present
+        if "Concat" not in df.columns:
+            df = df.with_columns([
+                pl.concat_str([pl.col(c) for c in df.columns if pl.col(c).dtype == pl.Utf8], separator=" ").alias("Concat")
+            ])
         return df
     except Exception as e:
-        st.error(f"Upload failed: {e}")
+        st.error(f"Failed to load data from Snowflake: {e}")
         return pl.DataFrame()
-
 df = load_data()
 
 def get_options(col):
@@ -151,6 +168,7 @@ if filtered_df.shape[0] > 0:
     )
 else:
     st.info("No data to export. Please adjust your filters or search.")
+
 
 
 
