@@ -17,7 +17,8 @@ def clean_string(s):
 
 @st.cache_data
 def load_data():
-    conn = snowflake.connector.connect(
+    try:
+        conn = snowflake.connector.connect(
             user=st.secrets["snowflake"]["user"],
             password=st.secrets["snowflake"]["password"],
             account=st.secrets["snowflake"]["account"],
@@ -44,6 +45,7 @@ def load_data():
     except Exception as e:
         st.error(f"Failed to load data from Snowflake: {e}")
         return pl.DataFrame()
+
 df = load_data()
 
 def get_options(col):
@@ -168,6 +170,7 @@ if filtered_df.shape[0] > 0:
     )
 else:
     st.info("No data to export. Please adjust your filters or search.")
+
 
 
 
