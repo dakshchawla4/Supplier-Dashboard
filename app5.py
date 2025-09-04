@@ -1,3 +1,4 @@
+import os
 import io
 import streamlit as st
 import polars as pl
@@ -5,18 +6,19 @@ import pandas as pd
 
 st.set_page_config(layout="wide")
 
-# -------- Password gate --------
+# ---------- Password gate ----------
 password = st.text_input("Enter Password to access the dashboard", type="password")
 if password != "Newjoiner@01":
     st.stop()
 
-# -------- Helpers --------
+# ---------- Helpers ----------
 def clean_string(s):
     if s is None:
         return ""
     return str(s).strip().lower()
 
 def safe_get_options(df: pl.DataFrame, col: str):
+    """Return ['All'] + sorted unique lowercased values for a column, safely."""
     if col not in df.columns:
         return ["All"]
     ser = (
@@ -28,41 +30,56 @@ def safe_get_options(df: pl.DataFrame, col: str):
     vals = sorted({v for v in ser.to_list() if v})
     return ["All"] + vals
 
-# -------- Data load (cached) --------
+def apply_eq_filter(frame: pl.DataFrame, col: str, val: str) -> pl.DataFrame:
+    if val == "All" or col not in frame.columns:
+        return frame
+    return frame.filter(pl.col(col).str.to_lowercase() == val)
+
+# ---------- Data load (cached) ----------
 @st.cache_data(show_spinner=True, ttl=600)
 def load_data() -> pl.DataFrame:
     try:
-        # Read Excel with pandas (most reliable), then convert to Polars
-        df_pd = pd.read_excel("excel.xlsx", engine="openpyxl")
+        # Try common file locations (Linux is case-sensitive on Render)
+        candidates = [
+            "excel.xlsx",
+            "Excel.xlsx",
+            "data/excel.xlsx",
+            "data/Excel.xlsx",
+        ]
+        path = next((p for p in candidates if os.path.exists(p)), None)
+        if not path:
+            # Helpful diagnostics (shows once in UI)
+            st.warning(f"excel.xlsx not found. CWD: {os.getcwd()}  Files: {os.listdir('.')}")
+            raise FileNotFoundError("excel.xlsx not found in repo root (or ./data).")
+
+        # Open in binary mode so the engine receives BYTES (prevents 'bool' type errors)
+        with open(path, "rb") as f:
+            df_pd = pd.read_excel(f, engine="openpyxl")
+
+        # Convert to Polars
         df = pl.from_pandas(df_pd)
 
-        # Clean column names to match filters below (spaces/slashes -> underscores)
-        rename_map = {
-            c: c.strip().replace("/", "_").replace(" ", "_")
-            for c in df.columns
-        }
-        df = df.rename(rename_map)
+        # Normalize column names: spaces & slashes -> underscores (matches your filters)
+        df = df.rename({c: c.strip().replace("/", "_").replace(" ", "_") for c in df.columns})
 
-        # Ensure all columns are strings for uniform search/filter behavior
+        # Ensure all columns are strings for consistent search/filter behavior
         df = df.with_columns([pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns])
 
-        # Build a searchable blob once (used by the free-text search)
+        # Build a searchable blob once
         if "Concat" not in df.columns:
             df = df.with_columns([
-                pl.concat_str(
-                    [pl.col(c).fill_null("") for c in df.columns],
-                    separator=" "
-                ).alias("Concat")
+                pl.concat_str([pl.col(c).fill_null("") for c in df.columns], separator=" ").alias("Concat")
             ])
 
         return df
+
     except Exception as e:
         st.error(f"Failed to load Excel file: {e}")
         return pl.DataFrame()
 
 df = load_data()
 
-# -------- Theme / styles --------
+# ---------- Styles ----------
 st.markdown("""
 <style>
 input, select, textarea, option { color:#1a1a1a !important; background-color:white !important; }
@@ -76,6 +93,7 @@ button .stButton button { color: Black!important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ---------- Header ----------
 left_col, right_col = st.columns([6,1])
 with left_col:
     st.markdown("""
@@ -91,7 +109,7 @@ with right_col:
     except Exception:
         pass
 
-# -------- Filters --------
+# ---------- Filters ----------
 search = st.text_input("Search", "")
 
 SupplierName_options = safe_get_options(df, "Supplier_Name")
@@ -113,14 +131,8 @@ with col6: Category2_filter    = st.selectbox("Filter by Category 2", Category2_
 with col7: Category3_filter    = st.selectbox("Filter by Category 3", Category3_options)
 with col8: Product_filter      = st.selectbox("Filter by Product", Product_options)
 
-# -------- Fast filtering --------
+# ---------- Apply filters ----------
 filtered_df = df
-
-def apply_eq_filter(frame: pl.DataFrame, col: str, val: str) -> pl.DataFrame:
-    if val == "All" or col not in frame.columns:
-        return frame
-    return frame.filter(pl.col(col).str.to_lowercase() == val)
-
 filtered_df = apply_eq_filter(filtered_df, "Supplier_Name",   supplierName_filter)
 filtered_df = apply_eq_filter(filtered_df, "City",            City_filter)
 filtered_df = apply_eq_filter(filtered_df, "State",           State_filter)
@@ -137,13 +149,13 @@ if search and "Concat" in filtered_df.columns:
 
 filtered_df_no_concat = filtered_df.drop(["Concat"], strict=False)
 
-# -------- Table --------
+# ---------- Table ----------
 st.dataframe(
     filtered_df_no_concat.head(4000).to_pandas(),
     use_container_width=True
 )
 
-# -------- Download --------
+# ---------- Download ----------
 if filtered_df_no_concat.height > 0:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
