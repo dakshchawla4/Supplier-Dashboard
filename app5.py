@@ -6,25 +6,22 @@ import pandas as pd
 
 st.set_page_config(layout="wide")
 
+# === Your Excel file (path + name) ===
+EXCEL_FILE = "excel.xlsx"   # keep this file in the repo root
+
 # ---------- Password gate ----------
 password = st.text_input("Enter Password to access the dashboard", type="password")
 if password != "Newjoiner@01":
     st.stop()
 
 # ---------- Helpers ----------
-def clean_string(s):
-    if s is None:
-        return ""
-    return str(s).strip().lower()
-
 def safe_get_options(df: pl.DataFrame, col: str):
-    """Return ['All'] + sorted unique lowercased values for a column, safely."""
     if col not in df.columns:
         return ["All"]
     ser = (
         df.select(pl.col(col).cast(pl.Utf8, strict=False))
           .drop_nulls()
-          .select(pl.col(col).str.strip_chars().str.to_lowercase())
+          .select(pl.col(col).str.strip().str.to_lowercase())
           .to_series()
     )
     vals = sorted({v for v in ser.to_list() if v})
@@ -35,37 +32,48 @@ def apply_eq_filter(frame: pl.DataFrame, col: str, val: str) -> pl.DataFrame:
         return frame
     return frame.filter(pl.col(col).str.to_lowercase() == val)
 
+def _read_excel_from_path(path: str) -> pd.DataFrame:
+    """Always read bytes so the engine never gets a bool/str."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 1024:
+        st.warning(
+            f"`{path}` looks very small ({len(data)} bytes). "
+            "If the file on GitHub shows 'version https://git-lfs.github.com/spec/v1', "
+            "you committed a Git LFS pointer instead of the real Excel."
+        )
+    return pd.read_excel(io.BytesIO(data), engine="openpyxl")
+
 # ---------- Data load (cached) ----------
 @st.cache_data(show_spinner=True, ttl=600)
-def load_data() -> pl.DataFrame:
+def load_data(explicit_path: str) -> pl.DataFrame:
     try:
-        # Try common file locations (Linux is case-sensitive on Render)
-        candidates = [
-            "excel.xlsx",
-            "Excel.xlsx",
-            "data/excel.xlsx",
-            "data/Excel.xlsx",
-        ]
-        path = next((p for p in candidates if os.path.exists(p)), None)
-        if not path:
-            # Helpful diagnostics (shows once in UI)
-            st.warning(f"excel.xlsx not found. CWD: {os.getcwd()}  Files: {os.listdir('.')}")
-            raise FileNotFoundError("excel.xlsx not found in repo root (or ./data).")
+        df_pd = None
+        if explicit_path and os.path.isfile(explicit_path):
+            df_pd = _read_excel_from_path(explicit_path)
+        else:
+            st.warning(
+                f"Could not find `{explicit_path}` in the app directory. "
+                "Upload an Excel file below to proceed."
+            )
 
-        # Open in binary mode so the engine receives BYTES (prevents 'bool' type errors)
-        with open(path, "rb") as f:
-            df_pd = pd.read_excel(f, engine="openpyxl")
+        # Upload fallback if the file isn't present
+        if df_pd is None:
+            up = st.file_uploader("Upload an Excel file", type=["xlsx"])
+            if up is None:
+                return pl.DataFrame()
+            df_pd = pd.read_excel(up, engine="openpyxl")
 
         # Convert to Polars
         df = pl.from_pandas(df_pd)
 
-        # Normalize column names: spaces & slashes -> underscores (matches your filters)
+        # Normalize column names: spaces & slashes -> underscores (matches filter names)
         df = df.rename({c: c.strip().replace("/", "_").replace(" ", "_") for c in df.columns})
 
-        # Ensure all columns are strings for consistent search/filter behavior
+        # Cast to strings for consistent filtering/search
         df = df.with_columns([pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns])
 
-        # Build a searchable blob once
+        # Build searchable blob once
         if "Concat" not in df.columns:
             df = df.with_columns([
                 pl.concat_str([pl.col(c).fill_null("") for c in df.columns], separator=" ").alias("Concat")
@@ -77,7 +85,8 @@ def load_data() -> pl.DataFrame:
         st.error(f"Failed to load Excel file: {e}")
         return pl.DataFrame()
 
-df = load_data()
+st.caption(f"📄 Attempting to load: **{EXCEL_FILE}**")
+df = load_data(EXCEL_FILE)
 
 # ---------- Styles ----------
 st.markdown("""
@@ -169,13 +178,6 @@ if filtered_df_no_concat.height > 0:
     )
 else:
     st.info("No data to export. Please adjust your filters or search.")
-
-
-
-
-
-
-
 
 
 
