@@ -3,3 +3,4 @@ pandas>=2.2.3
 polars>=1.6.0
 openpyxl
 pyarrow
+xlsx2csv
