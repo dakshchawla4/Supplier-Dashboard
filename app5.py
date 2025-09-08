@@ -154,7 +154,8 @@ st.dataframe(display_df.head(MAX_ROWS).to_pandas(), use_container_width=True)
 if filtered.height > 0:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        filtered.to_pandas().to_excel(write
+        filtered.to_pandas().to_excel(write)
+
 
 
 
