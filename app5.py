@@ -1,5 +1,8 @@
 import io
+import os
 import re
+from pathlib import Path
+
 import streamlit as st
 import polars as pl
 import pandas as pd
@@ -29,26 +32,43 @@ def apply_eq_filter(frame: pl.DataFrame, col: str, val: str) -> pl.DataFrame:
         return frame
     return frame.filter(pl.col(col).str.to_lowercase() == val)
 
+EXCEL_PATH = Path("excel.xlsx")
+PARQUET_PATH = Path("excel.parquet")
+
 # -------- Data load (cached) --------
-@st.cache_data(show_spinner=True, ttl=600)
-def load_data() -> pl.DataFrame:
+@st.cache_data(show_spinner=True, ttl=0)  # no TTL; cache keyed by mtime we pass in
+def load_data(excel_mtime: float) -> pl.DataFrame:
+    # If we already have a parquet newer than the Excel, load it (super fast)
+    if PARQUET_PATH.exists():
+        try:
+            pq_mtime = PARQUET_PATH.stat().st_mtime
+            if not EXCEL_PATH.exists() or pq_mtime >= excel_mtime:
+                df = pl.read_parquet(PARQUET_PATH)
+                return df
+        except Exception:
+            pass  # fall through to rebuild
+
+    # Try fastest path: xlsx2csv -> Polars CSV reader
     try:
-        # Read with pandas using openpyxl; then coerce *everything* to string
-        df_pd = pd.read_excel("excel.xlsx", engine="openpyxl")
-        df_pd = df_pd.fillna("").astype(str)  # <— prevents ArrowTypeError (bools/mixed)
-
-    except ImportError:
-        st.error("Missing dependency 'openpyxl'. Add 'openpyxl' to requirements.txt.")
-        return pl.DataFrame()
-    except FileNotFoundError:
-        st.error("File 'excel.xlsx' not found in the project root.")
-        return pl.DataFrame()
-    except Exception as e:
-        st.error(f"Failed to load Excel file: {e}")
-        return pl.DataFrame()
-
-    # Convert to Polars
-    df = pl.from_pandas(df_pd)
+        from xlsx2csv import Xlsx2csv
+        sio = io.StringIO()
+        Xlsx2csv(str(EXCEL_PATH), outputencoding="utf-8").convert(sio, sheetid=1)  # first sheet
+        sio.seek(0)
+        df = pl.read_csv(sio)  # very fast
+    except Exception:
+        # Fallback: pandas (engine=openpyxl), force strings to avoid ArrowTypeError
+        try:
+            df_pd = pd.read_excel(EXCEL_PATH, engine="openpyxl", dtype=str)
+        except FileNotFoundError:
+            st.error("File 'excel.xlsx' not found in the project root.")
+            return pl.DataFrame()
+        except ImportError:
+            st.error("Missing 'openpyxl'. Add it to requirements.txt.")
+            return pl.DataFrame()
+        except Exception as e:
+            st.error(f"Failed to load Excel file: {e}")
+            return pl.DataFrame()
+        df = pl.from_pandas(df_pd)
 
     # Normalize column names: trim and replace spaces/slashes with underscores
     rename_map = {c: re.sub(r"[\/\s]+", "_", str(c).strip()) for c in df.columns}
@@ -57,15 +77,16 @@ def load_data() -> pl.DataFrame:
     # Ensure all columns are UTF8 strings (uniform filtering/search)
     df = df.with_columns([pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns])
 
-    # Build a searchable blob if missing
-    if "Concat" not in df.columns:
-        df = df.with_columns(
-            pl.concat_str([pl.col(c).fill_null("") for c in df.columns], separator=" ").alias("Concat")
-        )
+    # Save a fast snapshot for next time
+    try:
+        df.write_parquet(PARQUET_PATH)
+    except Exception:
+        pass
 
     return df
 
-df = load_data()
+excel_mtime = EXCEL_PATH.stat().st_mtime if EXCEL_PATH.exists() else 0.0
+df = load_data(excel_mtime)
 
 # -------- Theme / styles --------
 st.markdown("""
@@ -130,7 +151,12 @@ filtered_df = apply_eq_filter(filtered_df, "Category_2",      Category2_filter)
 filtered_df = apply_eq_filter(filtered_df, "Category_3",      Category3_filter)
 filtered_df = apply_eq_filter(filtered_df, "Product_Service", Product_filter)
 
-if search and "Concat" in filtered_df.columns:
+# Build Concat only if needed (lazily)
+if search:
+    if "Concat" not in filtered_df.columns:
+        filtered_df = filtered_df.with_columns(
+            pl.concat_str([pl.col(c).fill_null("") for c in filtered_df.columns], separator=" ").alias("Concat")
+        )
     filtered_df = filtered_df.filter(
         pl.col("Concat").str.to_lowercase().str.contains(search.lower())
     )
@@ -157,6 +183,7 @@ if filtered_df_no_concat.height > 0:
     )
 else:
     st.info("No data to export. Please adjust your filters or search.")
+
 
 
 
