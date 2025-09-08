@@ -1,6 +1,3 @@
-streamlit
-pandas>=2.2.3
-polars>=1.6.0
-openpyxl
-pyarrow
-xlsx2csv
+streamlit==1.38.0
+pandas==2.3.2
+openpyxl==3.1.5
