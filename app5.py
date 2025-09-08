@@ -1,7 +1,13 @@
 import io
 import re
 import streamlit as st
-import polars as pl
+
+# Try Polars; fall back to Pandas if not installed
+try:
+    import polars as pl
+    HAS_POLARS = True
+except Exception:
+    HAS_POLARS = False
 import pandas as pd
 
 st.set_page_config(layout="wide")
@@ -28,54 +34,53 @@ def norm(s: str) -> str:
 
 def clean_colname(c: str) -> str:
     # "Supplier Name" or "Category/1" -> "Supplier_Name", "Category_1"
-    c2 = re.sub(r"[^0-9A-Za-z]+", "_", c.strip())
+    c2 = re.sub(r"[^0-9A-Za-z]+", "_", str(c).strip())
     return c2.strip("_")
 
-def get_options(df: pl.DataFrame, col: str):
-    if col not in df.columns:
-        return ["All"]
-    # keep first-seen display casing, match on lowercase
-    values = df.select(pl.col(col).cast(pl.Utf8, strict=False)).to_series().to_list()
+def options_from_series(values):
+    # keep first-seen display casing; match on lowercase
     uniq = {}
     for v in values:
-        vv = (v or "").strip()
+        vv = (str(v) if v is not None else "").strip()
         if vv:
             uniq.setdefault(vv.lower(), vv)
     return ["All"] + sorted(uniq.values(), key=lambda x: x.lower())
 
 # ---------- Data load (cached; runs once) ----------
-@st.cache_data(show_spinner=True, ttl=3600)  # keeps the “app shows fast after first load”
+@st.cache_data(show_spinner=True, ttl=3600)
 def load_data():
-    # 1) Read Excel as text to avoid ArrowTypeError & mixed types
+    # Read Excel as strings to avoid ArrowTypeError & mixed types
     df_pd = pd.read_excel("excel.xlsx", engine="openpyxl", dtype=str).fillna("")
-    # 2) Convert to Polars
-    df = pl.from_pandas(df_pd, include_index=False)
-    # 3) Standardize column names to expected ones
-    df = df.rename({c: clean_colname(c) for c in df.columns})
-    # 4) Ensure Utf8 for string ops
-    df = df.with_columns([pl.col(c).cast(pl.Utf8, strict=False).fill_null("").alias(c) for c in df.columns])
+    # Standardize column names
+    df_pd.columns = [clean_colname(c) for c in df_pd.columns]
 
-    # Require your existing Concat
-    if "Concat" not in df.columns:
-        # App stays visible; user sees a clear error
+    # Ensure Concat exists
+    if "Concat" not in df_pd.columns:
         st.error("The uploaded Excel must contain a 'Concat' column. Add it and redeploy.")
-        df = df.with_columns(pl.lit("").alias("Concat"))
+        df_pd["Concat"] = ""
 
-    # Build only a quick normalized copy for searching
-    df = df.with_columns(pl.col("Concat").str.to_lowercase().alias("Concat__norm"))
-
-    # Precompute normalized columns for filters (cheap & done once)
+    # Precompute normalized columns for filtering/search (done once)
+    df_pd["Concat__norm"] = df_pd["Concat"].astype(str).str.lower()
     for c in FILTER_COLS:
-        if c in df.columns:
-            df = df.with_columns(
-                pl.col(c).cast(pl.Utf8, strict=False).str.strip_chars().str.to_lowercase().alias(f"{c}__norm")
-            )
+        if c in df_pd.columns:
+            df_pd[f"{c}__norm"] = df_pd[c].astype(str).str.strip().str.lower()
 
-    # Dropdown options (pretty values)
-    options = {c: get_options(df, c) for c in FILTER_COLS}
-    return df, options
+    # Build dropdown options from original (pretty) values
+    options = {}
+    for c in FILTER_COLS:
+        if c in df_pd.columns:
+            options[c] = options_from_series(df_pd[c].tolist())
+        else:
+            options[c] = ["All"]
 
-df, options = load_data()
+    # If Polars is available, convert for faster filtering; otherwise keep pandas
+    if HAS_POLARS:
+        df_pl = pl.from_pandas(df_pd, include_index=False)
+        return ("polars", df_pl, options)
+    else:
+        return ("pandas", df_pd, options)
+
+mode, data, options = load_data()
 
 # ---------- Styles ----------
 st.markdown("""
@@ -118,44 +123,98 @@ with col6: Category2_filter    = st.selectbox("Filter by Category 2", options.ge
 with col7: Category3_filter    = st.selectbox("Filter by Category 3", options.get("Category_3", ["All"]))
 with col8: Product_filter      = st.selectbox("Filter by Product", options.get("Product_Service", ["All"]))
 
-# ---------- Fast filtering (uses precomputed __norm) ----------
-filtered = df
+# ---------- Filtering helpers ----------
+def selected_norm(s: str) -> str:
+    return "" if s == "All" else norm(s)
 
-def apply_eq(frame: pl.DataFrame, col: str, selected: str) -> pl.DataFrame:
-    norm_col = f"{col}__norm"
-    if selected == "All" or norm_col not in frame.columns:
-        return frame
-    return frame.filter(pl.col(norm_col) == norm(selected))
+# ---------- Apply filters & search ----------
+if mode == "polars":
+    df = data
+    def apply_eq(frame, col, sel):
+        if sel == "All" or f"{col}__norm" not in frame.columns:
+            return frame
+        return frame.filter(pl.col(f"{col}__norm") == norm(sel))
 
-filtered = apply_eq(filtered, "Supplier_Name",   supplierName_filter)
-filtered = apply_eq(filtered, "City",            City_filter)
-filtered = apply_eq(filtered, "State",           State_filter)
-filtered = apply_eq(filtered, "Location",        Location_filter)
-filtered = apply_eq(filtered, "Category_1",      Category1_filter)
-filtered = apply_eq(filtered, "Category_2",      Category2_filter)
-filtered = apply_eq(filtered, "Category_3",      Category3_filter)
-filtered = apply_eq(filtered, "Product_Service", Product_filter)
+    df = apply_eq(df, "Supplier_Name",   supplierName_filter)
+    df = apply_eq(df, "City",            City_filter)
+    df = apply_eq(df, "State",           State_filter)
+    df = apply_eq(df, "Location",        Location_filter)
+    df = apply_eq(df, "Category_1",      Category1_filter)
+    df = apply_eq(df, "Category_2",      Category2_filter)
+    df = apply_eq(df, "Category_3",      Category3_filter)
+    df = apply_eq(df, "Product_Service", Product_filter)
 
-# Search ONLY your prebuilt Concat (normalized once)
-if search.strip() and "Concat__norm" in filtered.columns:
-    terms = [t.strip().lower() for t in search.split() if t.strip()]
-    for t in terms:
-        filtered = filtered.filter(pl.col("Concat__norm").str.contains(t, literal=True))
+    if search.strip() and "Concat__norm" in df.columns:
+        terms = [t.strip().lower() for t in search.split() if t.strip()]
+        for t in terms:
+            df = df.filter(pl.col("Concat__norm").str.contains(t, literal=True))
 
-# Hide helper columns in the UI (keep Concat out of the table)
-HIDDEN_COLS = ["Concat", "Concat__norm"] + [f"{c}__norm" for c in FILTER_COLS]
-display_df = filtered.drop(HIDDEN_COLS, strict=False)
+    # Hide helper cols in UI
+    HIDDEN = ["Concat", "Concat__norm"] + [f"{c}__norm" for c in FILTER_COLS]
+    display_df = df.drop(HIDDEN, strict=False)
 
-# ---------- Table (limit rows before converting to pandas) ----------
-MAX_ROWS = 2000  # lower to 1000 if your browser feels sluggish
-st.dataframe(display_df.head(MAX_ROWS).to_pandas(), use_container_width=True)
+    # Show limited rows for speed
+    MAX_ROWS = 2000
+    st.dataframe(display_df.head(MAX_ROWS).to_pandas(), use_container_width=True)
 
-# ---------- Download (include Concat in export) ----------
-if filtered.height > 0:
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        filtered.to_pandas().to_excel(write)
+    # Download (include Concat & all data)
+    if df.height > 0:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_pandas().to_excel(writer, index=False, sheet_name="Results")
+            buffer.seek(0)
+        st.download_button(
+            label="Export Search Results",
+            data=buffer.getvalue(),
+            file_name="Supplier_Dashboard_Results.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("No data to export. Please adjust your filters or search.")
 
+else:
+    df = data  # pandas
+    def apply_eq(frame, col, sel):
+        coln = f"{col}__norm"
+        if sel == "All" or coln not in frame.columns:
+            return frame
+        return frame[frame[coln] == norm(sel)]
+
+    df_f = df.copy()
+    df_f = apply_eq(df_f, "Supplier_Name",   supplierName_filter)
+    df_f = apply_eq(df_f, "City",            City_filter)
+    df_f = apply_eq(df_f, "State",           State_filter)
+    df_f = apply_eq(df_f, "Location",        Location_filter)
+    df_f = apply_eq(df_f, "Category_1",      Category1_filter)
+    df_f = apply_eq(df_f, "Category_2",      Category2_filter)
+    df_f = apply_eq(df_f, "Category_3",      Category3_filter)
+    df_f = apply_eq(df_f, "Product_Service", Product_filter)
+
+    if search.strip() and "Concat__norm" in df_f.columns:
+        terms = [t.strip().lower() for t in search.split() if t.strip()]
+        for t in terms:
+            df_f = df_f[df_f["Concat__norm"].str.contains(t, regex=False)]
+
+    # Hide helper cols in UI
+    HIDDEN = ["Concat", "Concat__norm"] + [f"{c}__norm" for c in FILTER_COLS]
+    display_cols = [c for c in df_f.columns if c not in HIDDEN]
+    MAX_ROWS = 2000
+    st.dataframe(df_f.loc[:, display_cols].head(MAX_ROWS), use_container_width=True)
+
+    # Download (include Concat & all columns)
+    if len(df_f) > 0:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df_f.to_excel(writer, index=False, sheet_name="Results")
+            buffer.seek(0)
+        st.download_button(
+            label="Export Search Results",
+            data=buffer.getvalue(),
+            file_name="Supplier_Dashboard_Results.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("No data to export. Please adjust your filters or search.")
 
 
 
