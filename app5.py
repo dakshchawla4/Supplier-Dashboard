@@ -1,94 +1,62 @@
 import io
-import os
-import re
-from pathlib import Path
-
-import streamlit as st
-import polars as pl
 import pandas as pd
+import streamlit as st
 
 st.set_page_config(layout="wide")
 
-# -------- Password gate --------
+# ---------- Password gate ----------
 password = st.text_input("Enter Password to access the dashboard", type="password")
 if password != "Newjoiner@01":
     st.stop()
 
-# -------- Helpers --------
-def clean_string(s):
-    if s is None:
-        return ""
-    return str(s).strip().lower()
+# ---------- Helpers ----------
+EXPECTED_COLS = [
+    "Supplier_Name", "City", "State", "Location",
+    "Category_1", "Category_2", "Category_3", "Product_Service"
+]
 
-def safe_get_options(df: pl.DataFrame, col: str):
-    if df.is_empty() or col not in df.columns:
-        return ["All"]
-    ser = df.get_column(col).cast(pl.Utf8, strict=False)
-    vals = sorted({clean_string(v) for v in ser.unique().to_list() if clean_string(v)})
-    return ["All"] + vals
+def _normalize_cols(cols):
+    # strip spaces, turn spaces/slashes into underscores
+    return [c.strip().replace("/", "_").replace(" ", "_") for c in cols]
 
-def apply_eq_filter(frame: pl.DataFrame, col: str, val: str) -> pl.DataFrame:
-    if val == "All" or col not in frame.columns:
-        return frame
-    return frame.filter(pl.col(col).str.to_lowercase() == val)
-
-EXCEL_PATH = Path("excel.xlsx")
-PARQUET_PATH = Path("excel.parquet")
-
-# -------- Data load (cached) --------
-@st.cache_data(show_spinner=True, ttl=0)  # no TTL; cache keyed by mtime we pass in
-def load_data(excel_mtime: float) -> pl.DataFrame:
-    # If we already have a parquet newer than the Excel, load it (super fast)
-    if PARQUET_PATH.exists():
-        try:
-            pq_mtime = PARQUET_PATH.stat().st_mtime
-            if not EXCEL_PATH.exists() or pq_mtime >= excel_mtime:
-                df = pl.read_parquet(PARQUET_PATH)
-                return df
-        except Exception:
-            pass  # fall through to rebuild
-
-    # Try fastest path: xlsx2csv -> Polars CSV reader
+@st.cache_data(show_spinner=True, ttl=600)
+def load_data() -> pd.DataFrame:
+    """
+    Fast, safe Excel load:
+    - read everything as string to avoid ArrowTypeError/bytes<->bool issues
+    - normalize column names to your underscore style
+    """
     try:
-        from xlsx2csv import Xlsx2csv
-        sio = io.StringIO()
-        Xlsx2csv(str(EXCEL_PATH), outputencoding="utf-8").convert(sio, sheetid=1)  # first sheet
-        sio.seek(0)
-        df = pl.read_csv(sio)  # very fast
-    except Exception:
-        # Fallback: pandas (engine=openpyxl), force strings to avoid ArrowTypeError
-        try:
-            df_pd = pd.read_excel(EXCEL_PATH, engine="openpyxl", dtype=str)
-        except FileNotFoundError:
-            st.error("File 'excel.xlsx' not found in the project root.")
-            return pl.DataFrame()
-        except ImportError:
-            st.error("Missing 'openpyxl'. Add it to requirements.txt.")
-            return pl.DataFrame()
-        except Exception as e:
-            st.error(f"Failed to load Excel file: {e}")
-            return pl.DataFrame()
-        df = pl.from_pandas(df_pd)
+        df = pd.read_excel("excel.xlsx", dtype="string")  # engine auto-picks; openpyxl preferred
+    except Exception as e:
+        st.error(f"Failed to read excel.xlsx: {e}")
+        return pd.DataFrame()
 
-    # Normalize column names: trim and replace spaces/slashes with underscores
-    rename_map = {c: re.sub(r"[\/\s]+", "_", str(c).strip()) for c in df.columns}
-    df = df.rename(rename_map)
+    # Normalize columns to the underscore form your UI expects
+    df.columns = _normalize_cols(df.columns)
 
-    # Ensure all columns are UTF8 strings (uniform filtering/search)
-    df = df.with_columns([pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns])
-
-    # Save a fast snapshot for next time
-    try:
-        df.write_parquet(PARQUET_PATH)
-    except Exception:
-        pass
+    # Ensure all columns are string & trimmed
+    for c in df.columns:
+        df[c] = df[c].astype("string").str.strip()
 
     return df
 
-excel_mtime = EXCEL_PATH.stat().st_mtime if EXCEL_PATH.exists() else 0.0
-df = load_data(excel_mtime)
+df = load_data()
 
-# -------- Theme / styles --------
+def safe_options(frame: pd.DataFrame, col: str):
+    if col not in frame.columns:
+        return ["All"]
+    vals = (
+        frame[col]
+        .dropna()
+        .str.strip()
+        .str.lower()
+        .unique()
+    )
+    vals = sorted([v for v in vals if v])
+    return ["All"] + vals
+
+# ---------- Title / Header ----------
 st.markdown("""
 <style>
 input, select, textarea, option { color:#1a1a1a !important; background-color:white !important; }
@@ -102,8 +70,7 @@ button .stButton button { color: Black!important; }
 </style>
 """, unsafe_allow_html=True)
 
-# -------- Header --------
-left_col, right_col = st.columns([6,1])
+left_col, right_col = st.columns([6, 1])
 with left_col:
     st.markdown("""
         <div style="background-color: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;">
@@ -111,24 +78,23 @@ with left_col:
         </div>
     """, unsafe_allow_html=True)
 with right_col:
-    st.markdown('<div style="padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>',
-                unsafe_allow_html=True)
+    st.markdown('<div style="padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>', unsafe_allow_html=True)
     try:
         st.image("logo.jpg", width=100)
     except Exception:
         pass
 
-# -------- Filters --------
+# ---------- Search & filters ----------
 search = st.text_input("Search", "")
 
-SupplierName_options = safe_get_options(df, "Supplier_Name")
-City_options        = safe_get_options(df, "City")
-State_options       = safe_get_options(df, "State")
-Location_options    = safe_get_options(df, "Location")
-Category1_options   = safe_get_options(df, "Category_1")
-Category2_options   = safe_get_options(df, "Category_2")
-Category3_options   = safe_get_options(df, "Category_3")
-Product_options     = safe_get_options(df, "Product_Service")
+SupplierName_options = safe_options(df, "Supplier_Name")
+City_options        = safe_options(df, "City")
+State_options       = safe_options(df, "State")
+Location_options    = safe_options(df, "Location")
+Category1_options   = safe_options(df, "Category_1")
+Category2_options   = safe_options(df, "Category_2")
+Category3_options   = safe_options(df, "Category_3")
+Product_options     = safe_options(df, "Product_Service")
 
 col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
 with col1: supplierName_filter = st.selectbox("Filter by Name", SupplierName_options)
@@ -140,55 +106,49 @@ with col6: Category2_filter    = st.selectbox("Filter by Category 2", Category2_
 with col7: Category3_filter    = st.selectbox("Filter by Category 3", Category3_options)
 with col8: Product_filter      = st.selectbox("Filter by Product", Product_options)
 
-# -------- Fast filtering --------
-filtered_df = df
-filtered_df = apply_eq_filter(filtered_df, "Supplier_Name",   supplierName_filter)
-filtered_df = apply_eq_filter(filtered_df, "City",            City_filter)
-filtered_df = apply_eq_filter(filtered_df, "State",           State_filter)
-filtered_df = apply_eq_filter(filtered_df, "Location",        Location_filter)
-filtered_df = apply_eq_filter(filtered_df, "Category_1",      Category1_filter)
-filtered_df = apply_eq_filter(filtered_df, "Category_2",      Category2_filter)
-filtered_df = apply_eq_filter(filtered_df, "Category_3",      Category3_filter)
-filtered_df = apply_eq_filter(filtered_df, "Product_Service", Product_filter)
+def apply_eq(frame: pd.DataFrame, col: str, val: str) -> pd.DataFrame:
+    if val == "All" or col not in frame.columns:
+        return frame
+    # robust string compare
+    return frame[frame[col].fillna("").str.strip().str.lower() == val]
 
-# Build Concat only if needed (lazily)
-if search:
-    if "Concat" not in filtered_df.columns:
-        filtered_df = filtered_df.with_columns(
-            pl.concat_str([pl.col(c).fill_null("") for c in filtered_df.columns], separator=" ").alias("Concat")
-        )
-    filtered_df = filtered_df.filter(
-        pl.col("Concat").str.to_lowercase().str.contains(search.lower())
-    )
+filtered = df.copy()
+filtered = apply_eq(filtered, "Supplier_Name",   supplierName_filter)
+filtered = apply_eq(filtered, "City",            City_filter)
+filtered = apply_eq(filtered, "State",           State_filter)
+filtered = apply_eq(filtered, "Location",        Location_filter)
+filtered = apply_eq(filtered, "Category_1",      Category1_filter)
+filtered = apply_eq(filtered, "Category_2",      Category2_filter)
+filtered = apply_eq(filtered, "Category_3",      Category3_filter)
+filtered = apply_eq(filtered, "Product_Service", Product_filter)
 
-filtered_df_no_concat = filtered_df.drop(["Concat"], strict=False)
+# Search across all (string) columns without building a huge Concat column
+if search.strip():
+    q = search.strip().lower()
+    str_cols = [c for c in filtered.columns if pd.api.types.is_string_dtype(filtered[c])]
+    if str_cols:
+        mask = pd.Series(False, index=filtered.index)
+        for c in str_cols:
+            mask = mask | filtered[c].str.lower().str.contains(q, na=False)
+        filtered = filtered[mask]
 
-# -------- Table --------
-st.dataframe(
-    filtered_df_no_concat.head(4000).to_pandas(),
-    use_container_width=True
-)
+# ---------- Table ----------
+st.dataframe(filtered.head(4000), use_container_width=True)
 
-# -------- Download --------
-if filtered_df_no_concat.height > 0:
+# ---------- Download ----------
+if len(filtered) > 0:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        filtered_df_no_concat.to_pandas().to_excel(writer, index=False, sheet_name="Sheet")
+        filtered.to_excel(writer, index=False, sheet_name="Sheet")
         buffer.seek(0)
     st.download_button(
         label="Export Search Results",
         data=buffer.getvalue(),
         file_name="Supplier_Dashboard_Results.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 else:
     st.info("No data to export. Please adjust your filters or search.")
-
-
-
-
-
-
 
 
 
