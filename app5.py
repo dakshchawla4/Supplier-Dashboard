@@ -17,11 +17,26 @@ def clean_string(s):
         return ""
     return str(s).strip().lower()
 
+def safe_get_options(df: pl.DataFrame, col: str):
+    if df.is_empty() or col not in df.columns:
+        return ["All"]
+    ser = df.get_column(col).cast(pl.Utf8, strict=False)
+    vals = sorted({clean_string(v) for v in ser.unique().to_list() if clean_string(v)})
+    return ["All"] + vals
+
+def apply_eq_filter(frame: pl.DataFrame, col: str, val: str) -> pl.DataFrame:
+    if val == "All" or col not in frame.columns:
+        return frame
+    return frame.filter(pl.col(col).str.to_lowercase() == val)
+
+# -------- Data load (cached) --------
 @st.cache_data(show_spinner=True, ttl=600)
 def load_data() -> pl.DataFrame:
     try:
-        # Read with pandas (openpyxl) to avoid Polars' Excel optional deps
+        # Read with pandas using openpyxl; then coerce *everything* to string
         df_pd = pd.read_excel("excel.xlsx", engine="openpyxl")
+        df_pd = df_pd.fillna("").astype(str)  # <— prevents ArrowTypeError (bools/mixed)
+
     except ImportError:
         st.error("Missing dependency 'openpyxl'. Add 'openpyxl' to requirements.txt.")
         return pl.DataFrame()
@@ -29,19 +44,20 @@ def load_data() -> pl.DataFrame:
         st.error("File 'excel.xlsx' not found in the project root.")
         return pl.DataFrame()
     except Exception as e:
-        st.error(f"Upload failed: {e}")
+        st.error(f"Failed to load Excel file: {e}")
         return pl.DataFrame()
 
+    # Convert to Polars
     df = pl.from_pandas(df_pd)
 
-    # Normalize column names: trim and turn spaces/slashes into underscores
+    # Normalize column names: trim and replace spaces/slashes with underscores
     rename_map = {c: re.sub(r"[\/\s]+", "_", str(c).strip()) for c in df.columns}
     df = df.rename(rename_map)
 
-    # Ensure all cols are strings for consistent filtering/search
+    # Ensure all columns are UTF8 strings (uniform filtering/search)
     df = df.with_columns([pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in df.columns])
 
-    # Create a searchable blob if not present
+    # Build a searchable blob if missing
     if "Concat" not in df.columns:
         df = df.with_columns(
             pl.concat_str([pl.col(c).fill_null("") for c in df.columns], separator=" ").alias("Concat")
@@ -50,23 +66,6 @@ def load_data() -> pl.DataFrame:
     return df
 
 df = load_data()
-
-def get_options(col: str):
-    if df.is_empty() or col not in df.columns:
-        return ["All"]
-    ser = df.get_column(col).cast(pl.Utf8, strict=False)
-    vals = sorted({clean_string(v) for v in ser.unique().to_list() if clean_string(v)})
-    return ["All"] + vals
-
-# -------- Options for filters --------
-SupplierName_options = get_options("Supplier_Name")
-City_options        = get_options("City")
-State_options       = get_options("State")
-Location_options    = get_options("Location")
-Category1_options   = get_options("Category_1")
-Category2_options   = get_options("Category_2")
-Category3_options   = get_options("Category_3")
-Product_options     = get_options("Product_Service")
 
 # -------- Theme / styles --------
 st.markdown("""
@@ -82,6 +81,7 @@ button .stButton button { color: Black!important; }
 </style>
 """, unsafe_allow_html=True)
 
+# -------- Header --------
 left_col, right_col = st.columns([6,1])
 with left_col:
     st.markdown("""
@@ -100,6 +100,15 @@ with right_col:
 # -------- Filters --------
 search = st.text_input("Search", "")
 
+SupplierName_options = safe_get_options(df, "Supplier_Name")
+City_options        = safe_get_options(df, "City")
+State_options       = safe_get_options(df, "State")
+Location_options    = safe_get_options(df, "Location")
+Category1_options   = safe_get_options(df, "Category_1")
+Category2_options   = safe_get_options(df, "Category_2")
+Category3_options   = safe_get_options(df, "Category_3")
+Product_options     = safe_get_options(df, "Product_Service")
+
 col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
 with col1: supplierName_filter = st.selectbox("Filter by Name", SupplierName_options)
 with col2: City_filter         = st.selectbox("Filter by City", City_options)
@@ -110,14 +119,8 @@ with col6: Category2_filter    = st.selectbox("Filter by Category 2", Category2_
 with col7: Category3_filter    = st.selectbox("Filter by Category 3", Category3_options)
 with col8: Product_filter      = st.selectbox("Filter by Product", Product_options)
 
-# -------- Filtering --------
+# -------- Fast filtering --------
 filtered_df = df
-
-def apply_eq_filter(frame: pl.DataFrame, col: str, val: str) -> pl.DataFrame:
-    if val == "All" or col not in frame.columns:
-        return frame
-    return frame.filter(pl.col(col).str.to_lowercase() == val)
-
 filtered_df = apply_eq_filter(filtered_df, "Supplier_Name",   supplierName_filter)
 filtered_df = apply_eq_filter(filtered_df, "City",            City_filter)
 filtered_df = apply_eq_filter(filtered_df, "State",           State_filter)
@@ -154,9 +157,6 @@ if filtered_df_no_concat.height > 0:
     )
 else:
     st.info("No data to export. Please adjust your filters or search.")
-
-
-
 
 
 
