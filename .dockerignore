@@ -1,0 +1,10 @@
+# keep your .xlsx and logo.jpg!
+.git
+.gitignore
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+.DS_Store
