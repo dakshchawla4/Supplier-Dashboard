@@ -1,23 +1,66 @@
 import io
 import re
-import streamlit as st
-
-# Try Polars; fall back to Pandas if not installed
-try:
-    import polars as pl
-    HAS_POLARS = True
-except Exception:
-    HAS_POLARS = False
+import time
 import pandas as pd
+import polars as pl
+import streamlit as st
 
 st.set_page_config(layout="wide")
 
-# ---------- Auth ----------
+# -------------------- Auth --------------------
 password = st.text_input("Enter Password to access the dashboard", type="password")
 if password != "Newjoiner@01":
     st.stop()
 
-# ---------- Config ----------
+# -------------------- Helpers --------------------
+def _norm(s: str) -> str:
+    # normalize a column label to compare across variants
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)  # spaces, slashes -> underscore
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+# Canonical targets you want to use in code
+CANON = {
+    "supplier_name": "Supplier_Name",
+    "city": "City",
+    "state": "State",
+    "location": "Location",
+    "category_1": "Category_1",
+    "category_2": "Category_2",
+    "category_3": "Category_3",
+    "product_service": "Product_Service",
+    "concat": "Concat",
+}
+
+# Common synonyms -> canonical key (left side uses our _norm form)
+SYNONYMS = {
+    # supplier
+    "supplier_name": "supplier_name",
+    "suppliername": "supplier_name",
+    # city/state/location
+    "city": "city",
+    "state": "state",
+    "location": "location",
+    # product/service
+    "product_service": "product_service",
+    "productservice": "product_service",
+    "product_services": "product_service",
+    "product": "product_service",
+    "service": "product_service",
+    # categories
+    "category_1": "category_1",
+    "category1": "category_1",
+    "category_2": "category_2",
+    "category2": "category_2",
+    "category_3": "category_3",
+    "category3": "category_3",
+    # search column
+    "concat": "concat",
+    "search_blob": "concat",
+    "search": "concat",
+}
+
 FILTER_COLS = [
     "Supplier_Name",
     "City",
@@ -29,60 +72,79 @@ FILTER_COLS = [
     "Product_Service",
 ]
 
-def norm(s: str) -> str:
-    return (s or "").strip().lower()
+# -------------------- Data load (cached) --------------------
+@st.cache_data(show_spinner=True)
+def load_data(excel_path: str = "excel.xlsx") -> pl.DataFrame:
+    # Read ALL columns as strings (fast & consistent)
+    df_pd = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
+    df_pd = df_pd.fillna("")  # ensure empty strings instead of NaN
 
-def clean_colname(c: str) -> str:
-    # "Supplier Name" or "Category/1" -> "Supplier_Name", "Category_1"
-    c2 = re.sub(r"[^0-9A-Za-z]+", "_", str(c).strip())
-    return c2.strip("_")
+    # Rename columns to canonical labels
+    rename_map = {}
+    for col in df_pd.columns:
+        key = _norm(col)
+        if key in SYNONYMS:
+            canon_key = SYNONYMS[key]
+            rename_map[col] = CANON[canon_key]
+    if rename_map:
+        df_pd = df_pd.rename(columns=rename_map)
 
-def options_from_series(values):
-    # keep first-seen display casing; match on lowercase
-    uniq = {}
-    for v in values:
-        vv = (str(v) if v is not None else "").strip()
-        if vv:
-            uniq.setdefault(vv.lower(), vv)
-    return ["All"] + sorted(uniq.values(), key=lambda x: x.lower())
+    # Validate presence of required columns
+    missing = [c for c in ["Concat"] if c not in df_pd.columns]
+    if missing:
+        raise ValueError(
+            f"Missing column(s) {missing}. Your Excel must include a prebuilt 'Concat' column."
+        )
 
-# ---------- Data load (cached; runs once) ----------
-@st.cache_data(show_spinner=True, ttl=3600)
-def load_data():
-    # Read Excel as strings to avoid ArrowTypeError & mixed types
-    df_pd = pd.read_excel("excel.xlsx", engine="openpyxl", dtype=str).fillna("")
-    # Standardize column names
-    df_pd.columns = [clean_colname(c) for c in df_pd.columns]
+    # Convert to Polars
+    df = pl.from_pandas(df_pd)
 
-    # Ensure Concat exists
-    if "Concat" not in df_pd.columns:
-        st.error("The uploaded Excel must contain a 'Concat' column. Add it and redeploy.")
-        df_pd["Concat"] = ""
+    # Precompute LOWERCASE helper columns once (used for fast filtering/search)
+    # Only for columns we actually need.
+    lc_targets = [c for c in (FILTER_COLS + ["Concat"]) if c in df.columns]
+    df = df.with_columns([
+        pl.when(pl.col(c).is_null()).then("").otherwise(pl.col(c))
+        .cast(pl.Utf8)
+        .str.strip()
+        .str.to_lowercase()
+        .alias(f"{c}__lc")
+        for c in lc_targets
+    ])
 
-    # Precompute normalized columns for filtering/search (done once)
-    df_pd["Concat__norm"] = df_pd["Concat"].astype(str).str.lower()
-    for c in FILTER_COLS:
-        if c in df_pd.columns:
-            df_pd[f"{c}__norm"] = df_pd[c].astype(str).str.strip().str.lower()
+    return df
 
-    # Build dropdown options from original (pretty) values
-    options = {}
-    for c in FILTER_COLS:
-        if c in df_pd.columns:
-            options[c] = options_from_series(df_pd[c].tolist())
-        else:
-            options[c] = ["All"]
+# Load once from cache
+t0 = time.perf_counter()
+df = load_data()
+load_ms = (time.perf_counter() - t0) * 1000
 
-    # If Polars is available, convert for faster filtering; otherwise keep pandas
-    if HAS_POLARS:
-        df_pl = pl.from_pandas(df_pd, include_index=False)
-        return ("polars", df_pl, options)
-    else:
-        return ("pandas", df_pd, options)
+# -------------------- Options helpers --------------------
+def get_options(df_pl: pl.DataFrame, col: str) -> list[str]:
+    if col not in df_pl.columns:
+        return ["All"]
+    # Show tidy, unique (case-insensitive) values; we use lowercase helper for dedupe/sort
+    lc = f"{col}__lc"
+    if lc not in df_pl.columns:
+        return ["All"]
+    # Get unique lower values
+    uniques = df_pl.select(pl.col(lc)).unique().to_series().to_list()
+    uniques = [v for v in uniques if v]  # drop blanks
+    uniques = sorted(uniques)
+    # Display as Title Case for nicer UI (you can change to raw lower if you prefer)
+    display = [u for u in uniques]
+    # First item is "All"
+    return ["All"] + display
 
-mode, data, options = load_data()
+SupplierName_options = get_options(df, "Supplier_Name")
+City_options        = get_options(df, "City")
+State_options       = get_options(df, "State")
+Location_options    = get_options(df, "Location")
+Category1_options   = get_options(df, "Category_1")
+Category2_options   = get_options(df, "Category_2")
+Category3_options   = get_options(df, "Category_3")
+Product_options     = get_options(df, "Product_Service")
 
-# ---------- Styles ----------
+# -------------------- Styles / Header --------------------
 st.markdown("""
 <style>
 input, select, textarea, option { color:#1a1a1a !important; background-color:white !important; }
@@ -96,129 +158,98 @@ button .stButton button { color: Black!important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Header ----------
-left_col, right_col = st.columns([6,1])
+left_col, right_col = st.columns([6, 1])
 with left_col:
     st.markdown("""
         <div style="background-color: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;">
-            <span style="color: #0F1C2E; font-size: 26px; font-weight: bold;">Supplier Dashboard</span>
+            <span style='color: #0F1C2E; font-size: 26px; font-weight: bold;'> Supplier Dashboard </span>
         </div>
     """, unsafe_allow_html=True)
 with right_col:
-    try:
-        st.image("logo.jpg", width=100)
-    except Exception:
-        pass
+    st.markdown("""<div style="padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>""",
+                unsafe_allow_html=True)
+    st.image("logo.jpg", width=100)
 
-# ---------- Search & Filters ----------
-search = st.text_input("Search (matches only the Concat column)", "")
+# -------------------- Filters & Search (FORM -> submit once) --------------------
+with st.form("filters_form", clear_on_submit=False):
+    search = st.text_input("Search (uses only your prebuilt 'Concat' column)", "")
 
-col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
-with col1: supplierName_filter = st.selectbox("Filter by Name", options.get("Supplier_Name", ["All"]))
-with col2: City_filter         = st.selectbox("Filter by City", options.get("City", ["All"]))
-with col3: State_filter        = st.selectbox("Filter by State", options.get("State", ["All"]))
-with col4: Location_filter     = st.selectbox("Filter by Location", options.get("Location", ["All"]))
-with col5: Category1_filter    = st.selectbox("Filter by Category 1", options.get("Category_1", ["All"]))
-with col6: Category2_filter    = st.selectbox("Filter by Category 2", options.get("Category_2", ["All"]))
-with col7: Category3_filter    = st.selectbox("Filter by Category 3", options.get("Category_3", ["All"]))
-with col8: Product_filter      = st.selectbox("Filter by Product", options.get("Product_Service", ["All"]))
+    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
+    with col1:
+        supplierName_filter = st.selectbox("Filter by Name", SupplierName_options, index=0)
+    with col2:
+        City_filter = st.selectbox("Filter by City", City_options, index=0)
+    with col3:
+        State_filter = st.selectbox("Filter by State", State_options, index=0)
+    with col4:
+        Location_filter = st.selectbox("Filter by Location", Location_options, index=0)
+    with col5:
+        Category1_filter = st.selectbox("Filter by Category 1", Category1_options, index=0)
+    with col6:
+        Category2_filter = st.selectbox("Filter by Category 2", Category2_options, index=0)
+    with col7:
+        Category3_filter = st.selectbox("Filter by Category 3", Category3_options, index=0)
+    with col8:
+        Product_filter = st.selectbox("Filter by Product", Product_options, index=0)
 
-# ---------- Filtering helpers ----------
-def selected_norm(s: str) -> str:
-    return "" if s == "All" else norm(s)
+    apply_clicked = st.form_submit_button("Apply")
 
-# ---------- Apply filters & search ----------
-if mode == "polars":
-    df = data
-    def apply_eq(frame, col, sel):
-        if sel == "All" or f"{col}__norm" not in frame.columns:
-            return frame
-        return frame.filter(pl.col(f"{col}__norm") == norm(sel))
+# -------------------- Filtering (fast; uses *_lc helper cols) --------------------
+def _lc(s: str) -> str:
+    return (s or "").strip().lower()
 
-    df = apply_eq(df, "Supplier_Name",   supplierName_filter)
-    df = apply_eq(df, "City",            City_filter)
-    df = apply_eq(df, "State",           State_filter)
-    df = apply_eq(df, "Location",        Location_filter)
-    df = apply_eq(df, "Category_1",      Category1_filter)
-    df = apply_eq(df, "Category_2",      Category2_filter)
-    df = apply_eq(df, "Category_3",      Category3_filter)
-    df = apply_eq(df, "Product_Service", Product_filter)
+filtered_df = df
 
-    if search.strip() and "Concat__norm" in df.columns:
-        terms = [t.strip().lower() for t in search.split() if t.strip()]
-        for t in terms:
-            df = df.filter(pl.col("Concat__norm").str.contains(t, literal=True))
+# Per-filter equality on lowercase helper columns
+filters = [
+    ("Supplier_Name", supplierName_filter),
+    ("City", City_filter),
+    ("State", State_filter),
+    ("Location", Location_filter),
+    ("Category_1", Category1_filter),
+    ("Category_2", Category2_filter),
+    ("Category_3", Category3_filter),
+    ("Product_Service", Product_filter),
+]
+for base_col, val in filters:
+    if val and val != "All" and (f"{base_col}__lc" in filtered_df.columns):
+        filtered_df = filtered_df.filter(pl.col(f"{base_col}__lc") == _lc(val))
 
-    # Hide helper cols in UI
-    HIDDEN = ["Concat", "Concat__norm"] + [f"{c}__norm" for c in FILTER_COLS]
-    display_df = df.drop(HIDDEN, strict=False)
-
-    # Show limited rows for speed
-    MAX_ROWS = 2000
-    st.dataframe(display_df.head(MAX_ROWS).to_pandas(), use_container_width=True)
-
-    # Download (include Concat & all data)
-    if df.height > 0:
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df.to_pandas().to_excel(writer, index=False, sheet_name="Results")
-            buffer.seek(0)
-        st.download_button(
-            label="Export Search Results",
-            data=buffer.getvalue(),
-            file_name="Supplier_Dashboard_Results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# Search ONLY on Concat (lowercase helper)
+if search.strip():
+    if "Concat__lc" in filtered_df.columns:
+        # literal=True => no regex cost; case-insensitive via lower helper
+        filtered_df = filtered_df.filter(
+            pl.col("Concat__lc").str.contains(_lc(search), literal=True)
         )
     else:
-        st.info("No data to export. Please adjust your filters or search.")
+        st.warning("Concat column not available for search.")
 
+# Hide helper columns and hide Concat in the UI (but keep original Concat for export)
+drop_cols = [c for c in filtered_df.columns if c.endswith("__lc")]
+to_show = filtered_df.drop(drop_cols + (["Concat"] if "Concat" in filtered_df.columns else []))
+
+# -------------------- Table --------------------
+# Limit rows shown for UI perf. Adjust if you want.
+MAX_SHOW = 2000
+st.dataframe(to_show.head(MAX_SHOW).to_pandas(), use_container_width=True)
+
+# -------------------- Export --------------------
+# Export the FULL filtered result (includes 'Concat')
+if filtered_df.height > 0:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        filtered_df.to_pandas().to_excel(writer, index=False, sheet_name="Sheet")
+    buf.seek(0)
+    st.download_button(
+        label=f"Export Results ({filtered_df.height} rows)",
+        data=buf.getvalue(),
+        file_name="Supplier_Dashboard_Results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 else:
-    df = data  # pandas
-    def apply_eq(frame, col, sel):
-        coln = f"{col}__norm"
-        if sel == "All" or coln not in frame.columns:
-            return frame
-        return frame[frame[coln] == norm(sel)]
+    st.info("No data to export. Please adjust your filters or search.")
 
-    df_f = df.copy()
-    df_f = apply_eq(df_f, "Supplier_Name",   supplierName_filter)
-    df_f = apply_eq(df_f, "City",            City_filter)
-    df_f = apply_eq(df_f, "State",           State_filter)
-    df_f = apply_eq(df_f, "Location",        Location_filter)
-    df_f = apply_eq(df_f, "Category_1",      Category1_filter)
-    df_f = apply_eq(df_f, "Category_2",      Category2_filter)
-    df_f = apply_eq(df_f, "Category_3",      Category3_filter)
-    df_f = apply_eq(df_f, "Product_Service", Product_filter)
-
-    if search.strip() and "Concat__norm" in df_f.columns:
-        terms = [t.strip().lower() for t in search.split() if t.strip()]
-        for t in terms:
-            df_f = df_f[df_f["Concat__norm"].str.contains(t, regex=False)]
-
-    # Hide helper cols in UI
-    HIDDEN = ["Concat", "Concat__norm"] + [f"{c}__norm" for c in FILTER_COLS]
-    display_cols = [c for c in df_f.columns if c not in HIDDEN]
-    MAX_ROWS = 2000
-    st.dataframe(df_f.loc[:, display_cols].head(MAX_ROWS), use_container_width=True)
-
-    # Download (include Concat & all columns)
-    if len(df_f) > 0:
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df_f.to_excel(writer, index=False, sheet_name="Results")
-            buffer.seek(0)
-        st.download_button(
-            label="Export Search Results",
-            data=buffer.getvalue(),
-            file_name="Supplier_Dashboard_Results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.info("No data to export. Please adjust your filters or search.")
-
-
-
-
-
-
-
+# -------------------- Footnote --------------------
+st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
