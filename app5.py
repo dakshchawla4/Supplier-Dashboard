@@ -1,3 +1,4 @@
+# app5.py - copy/paste this entire file
 import io
 import re
 import time
@@ -15,11 +16,10 @@ if password != "Newjoiner@01":
 # -------------------- Helpers --------------------
 def _norm(s: str) -> str:
     s = (s or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)  # spaces, slashes -> underscore
+    s = re.sub(r"[^a-z0-9]+", "_", s)
     s = re.sub(r"_+", "_", s).strip("_")
     return s
 
-# Canonical column names your UI expects
 CANON = {
     "supplier_name": "Supplier_Name",
     "city": "City",
@@ -32,7 +32,6 @@ CANON = {
     "concat": "Concat",
 }
 
-# Synonyms map (normalized keys -> CANON keys)
 SYNONYMS = {
     "supplier_name": "supplier_name",
     "suppliername": "supplier_name",
@@ -70,16 +69,19 @@ FILTER_COLS = [
 @st.cache_data(show_spinner=True)
 def load_data(excel_path: str = "excel.xlsx") -> pl.DataFrame:
     """
-    Read Excel (via pandas), normalise column NAMES to canonical labels,
-    auto-create a 'Concat' column if missing (concatenation of all textual fields),
-    convert to Polars and create lowercase helper columns for fast filtering.
+    Robust loading:
+    - read with pandas (strings),
+    - normalize header names to canonical,
+    - create 'Concat' if missing,
+    - build lowercase helper columns in pandas,
+    - convert to Polars and return.
     """
     try:
-        # Read Excel into pandas first (ensures openpyxl engine is used)
+        # 1) read Excel as strings
         df_pd = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
-        df_pd = df_pd.fillna("")  # replace NaN with empty string
+        df_pd = df_pd.fillna("")  # empty strings instead of NaN
 
-        # Build rename map: match column header variants to canonical names
+        # 2) normalize headers -> canonical names where we can match synonyms
         rename_map = {}
         for col in df_pd.columns:
             key = _norm(col)
@@ -89,53 +91,36 @@ def load_data(excel_path: str = "excel.xlsx") -> pl.DataFrame:
         if rename_map:
             df_pd = df_pd.rename(columns=rename_map)
 
-        # If 'Concat' not present, build it by joining all columns (use pandas for this step)
+        # 3) ensure Concat exists; if not, build from all columns
         if "Concat" not in df_pd.columns:
-            # join all columns into a single search blob (space-separated)
-            # use .astype(str) to avoid issues if non-string types present
+            # build a single string per row
             df_pd["Concat"] = df_pd.astype(str).agg(" ".join, axis=1)
 
-        # Convert pandas -> polars
+        # 4) build lowercase helper columns in pandas for robustness
+        lc_cols = [c for c in (FILTER_COLS + ["Concat"]) if c in df_pd.columns]
+        for c in lc_cols:
+            df_pd[f"{c}__lc"] = df_pd[c].astype(str).str.strip().str.lower().fillna("")
+
+        # 5) convert to Polars and return
         df = pl.from_pandas(df_pd)
-
-        # Prepare lowercase helper columns only for columns we need
-        lc_targets = [c for c in (FILTER_COLS + ["Concat"]) if c in df.columns]
-        # Create <col>__lc columns: strip, lower, ensure Utf8
-        lc_exprs = [
-            pl.when(pl.col(c).is_null()).then("").otherwise(pl.col(c))
-            .cast(pl.Utf8)
-            .str.strip()
-            .str.to_lowercase()
-            .alias(f"{c}__lc")
-            for c in lc_targets
-        ]
-        if lc_exprs:
-            df = df.with_columns(lc_exprs)
-
         return df
 
     except Exception as e:
         st.error(f"Upload failed in load_data(): {e}")
-        # return empty Polars DF with no columns (safe fallback)
         return pl.DataFrame()
 
-# Load once from cache
+# Load once
 t0 = time.perf_counter()
 df = load_data()
 load_ms = (time.perf_counter() - t0) * 1000
 
-# -------------------- Options helpers --------------------
+# -------------------- Options helper --------------------
 def get_options(df_pl: pl.DataFrame, col: str) -> list:
-    """
-    Safely get unique options for a column using the lowercase helper column.
-    Returns ['All', ...sorted unique lower-case values...]
-    """
     lc = f"{col}__lc"
     if col not in df_pl.columns or lc not in df_pl.columns:
         return ["All"]
-    # get uniques via polars - return python list
     uniques = df_pl.select(pl.col(lc)).unique().to_series().to_list()
-    uniques = [v for v in uniques if v]  # drop blanks
+    uniques = [v for v in uniques if v]
     uniques = sorted(uniques)
     return ["All"] + uniques
 
@@ -174,7 +159,7 @@ with right_col:
                 unsafe_allow_html=True)
     st.image("logo.jpg", width=100)
 
-# -------------------- Filters & Search (FORM -> submit once) --------------------
+# -------------------- Filters & Search (FORM) --------------------
 with st.form("filters_form", clear_on_submit=False):
     search = st.text_input("Search (uses only your prebuilt 'Concat' column)", "")
 
@@ -204,7 +189,6 @@ def _lc(s: str) -> str:
 
 filtered_df = df
 
-# Per-filter equality on lowercase helper columns
 filters = [
     ("Supplier_Name", supplierName_filter),
     ("City", City_filter),
@@ -254,3 +238,8 @@ else:
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+
+
+# -------------------- Footnote --------------------
+st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+
