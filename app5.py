@@ -242,4 +242,3 @@ st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searc
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
-
