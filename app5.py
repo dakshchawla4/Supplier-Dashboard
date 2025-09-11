@@ -215,9 +215,9 @@ with right_col:
                 unsafe_allow_html=True)
     st.image("logo.jpg", width=100)
 
-# -------------------- Filters & Search (FORM) --------------------
+# -------------------- Filters &  (FORM) --------------------
 with st.form("filters_form", clear_on_submit=False):
-    search = st.text_input("Search (uses only your prebuilt 'Concat' column)", "")
+    search = st.text_input("Search", "")
 
     col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
     with col1:
@@ -298,4 +298,5 @@ st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searc
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+
 
