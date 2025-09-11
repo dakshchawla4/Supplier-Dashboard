@@ -136,71 +136,15 @@ Product_options     = get_options(df, "Product_Service")
 # -------------------- Styles / Header --------------------
 st.markdown("""
 <style>
-/* page-wide small tweaks kept from before */
 input, select, textarea, option { color:#1a1a1a !important; background-color:white !important; }
 label, .stTextInput > label, .stSelectbox > label, .stMarkdown h3, .stMarkdown h4 { color:White!important; }
 [data-testid="stAppViewContainer"] { background-color: #0F1C2E; }
-
-/* Header layout: fixed header height so items align perfectly */
-.header-row {
-  display: flex;
-  align-items: center;                /* vertical centering */
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
-  height: 88px;                       /* controls visual height of white box area */
-}
-
-/* White box (left) - use flex so content vertically centers */
-.header-left {
-  background-color: white;
-  padding: 18px 22px;                 /* tune vertical/horizontal padding */
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  flex: 1;                             /* takes remaining width */
-  min-height: 56px;                    /* ensures minimal height regardless of content */
-  box-sizing: border-box;
-}
-
-/* Title style inside white box (keeps same look) */
-.header-title {
-  color: #0F1C2E;
-  font-size: 26px;
-  font-weight: 700;
-  margin: 0;
-  line-height: 1;
-}
-
-/* Logo container on the right - fixed box to guarantee alignment */
-.header-logo-wrap {
-  width: 96px;                         /* fixed width for consistent placement */
-  height: 64px;                        /* match vertical center to white box area */
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-}
-
-/* Logo image - use height to preserve aspect ratio exactly */
-.header-logo-wrap img {
-  height: 56px;                        /* exact visible logo height; tweak ±4px if needed */
-  width: auto;
-  object-fit: contain;
-  border-radius: 6px;                  /* optional rounded corners */
-  box-shadow: 0 2px 6px rgba(0,0,0,0.12); /* subtle shadow to separate from bg */
-}
+.white-box { background-color: white; padding: 1.5rem; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; }
+.title-text { font-size:28px; font-weight:bold; color:#102A43; display:flex; align-items:center; }
+.symbol { font-size:34px; margin-right:15px; color:#102A43; }
+button[kind="download"] { background-color:#1E88E5 !important; color:white!important; border:none!important; padding: 10px 20px!important; border-radius: 5px!important; font-weight: bold!important; }
+button .stButton button { color: Black!important; }
 </style>
-
-<div class="header-row">
-  <div class="header-left">
-    <h1 class="header-title">Supplier Dashboard</h1>
-  </div>
-
-  <div class="header-logo-wrap">
-    <img src="logo.jpg" alt="logo" />
-  </div>
-</div>
 """, unsafe_allow_html=True)
 
 left_col, right_col = st.columns([6, 1])
@@ -213,11 +157,11 @@ with left_col:
 with right_col:
     st.markdown("""<div style="padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>""",
                 unsafe_allow_html=True)
-    st.image("logo.jpg", width=100)
+    st.image("logo.jpg")
 
-# -------------------- Filters &  (FORM) --------------------
+# -------------------- Filters & Search (FORM) --------------------
 with st.form("filters_form", clear_on_submit=False):
-    search = st.text_input("Search", "")
+    search = st.text_input("Search ", "")
 
     col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
     with col1:
@@ -298,5 +242,3 @@ st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searc
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
-
-
