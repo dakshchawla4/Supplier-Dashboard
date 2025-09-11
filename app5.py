@@ -14,13 +14,12 @@ if password != "Newjoiner@01":
 
 # -------------------- Helpers --------------------
 def _norm(s: str) -> str:
-    # normalize a column label to compare across variants
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)  # spaces, slashes -> underscore
     s = re.sub(r"_+", "_", s).strip("_")
     return s
 
-# Canonical targets you want to use in code
+# Canonical column names your UI expects
 CANON = {
     "supplier_name": "Supplier_Name",
     "city": "City",
@@ -33,29 +32,24 @@ CANON = {
     "concat": "Concat",
 }
 
-# Common synonyms -> canonical key (left side uses our _norm form)
+# Synonyms map (normalized keys -> CANON keys)
 SYNONYMS = {
-    # supplier
     "supplier_name": "supplier_name",
     "suppliername": "supplier_name",
-    # city/state/location
     "city": "city",
     "state": "state",
     "location": "location",
-    # product/service
     "product_service": "product_service",
     "productservice": "product_service",
     "product_services": "product_service",
     "product": "product_service",
     "service": "product_service",
-    # categories
     "category_1": "category_1",
     "category1": "category_1",
     "category_2": "category_2",
     "category2": "category_2",
     "category_3": "category_3",
     "category3": "category_3",
-    # search column
     "concat": "concat",
     "search_blob": "concat",
     "search": "concat",
@@ -75,43 +69,55 @@ FILTER_COLS = [
 # -------------------- Data load (cached) --------------------
 @st.cache_data(show_spinner=True)
 def load_data(excel_path: str = "excel.xlsx") -> pl.DataFrame:
-    # Read ALL columns as strings (fast & consistent)
-    df_pd = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
-    df_pd = df_pd.fillna("")  # ensure empty strings instead of NaN
+    """
+    Read Excel (via pandas), normalise column NAMES to canonical labels,
+    auto-create a 'Concat' column if missing (concatenation of all textual fields),
+    convert to Polars and create lowercase helper columns for fast filtering.
+    """
+    try:
+        # Read Excel into pandas first (ensures openpyxl engine is used)
+        df_pd = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
+        df_pd = df_pd.fillna("")  # replace NaN with empty string
 
-    # Rename columns to canonical labels
-    rename_map = {}
-    for col in df_pd.columns:
-        key = _norm(col)
-        if key in SYNONYMS:
-            canon_key = SYNONYMS[key]
-            rename_map[col] = CANON[canon_key]
-    if rename_map:
-        df_pd = df_pd.rename(columns=rename_map)
+        # Build rename map: match column header variants to canonical names
+        rename_map = {}
+        for col in df_pd.columns:
+            key = _norm(col)
+            if key in SYNONYMS:
+                canon_key = SYNONYMS[key]
+                rename_map[col] = CANON[canon_key]
+        if rename_map:
+            df_pd = df_pd.rename(columns=rename_map)
 
-    # Validate presence of required columns
-    missing = [c for c in ["Concat"] if c not in df_pd.columns]
-    if missing:
-        raise ValueError(
-            f"Missing column(s) {missing}. Your Excel must include a prebuilt 'Concat' column."
-        )
+        # If 'Concat' not present, build it by joining all columns (use pandas for this step)
+        if "Concat" not in df_pd.columns:
+            # join all columns into a single search blob (space-separated)
+            # use .astype(str) to avoid issues if non-string types present
+            df_pd["Concat"] = df_pd.astype(str).agg(" ".join, axis=1)
 
-    # Convert to Polars
-    df = pl.from_pandas(df_pd)
+        # Convert pandas -> polars
+        df = pl.from_pandas(df_pd)
 
-    # Precompute LOWERCASE helper columns once (used for fast filtering/search)
-    # Only for columns we actually need.
-    lc_targets = [c for c in (FILTER_COLS + ["Concat"]) if c in df.columns]
-    df = df.with_columns([
-        pl.when(pl.col(c).is_null()).then("").otherwise(pl.col(c))
-        .cast(pl.Utf8)
-        .str.strip()
-        .str.to_lowercase()
-        .alias(f"{c}__lc")
-        for c in lc_targets
-    ])
+        # Prepare lowercase helper columns only for columns we need
+        lc_targets = [c for c in (FILTER_COLS + ["Concat"]) if c in df.columns]
+        # Create <col>__lc columns: strip, lower, ensure Utf8
+        lc_exprs = [
+            pl.when(pl.col(c).is_null()).then("").otherwise(pl.col(c))
+            .cast(pl.Utf8)
+            .str.strip()
+            .str.to_lowercase()
+            .alias(f"{c}__lc")
+            for c in lc_targets
+        ]
+        if lc_exprs:
+            df = df.with_columns(lc_exprs)
 
-    return df
+        return df
+
+    except Exception as e:
+        st.error(f"Upload failed in load_data(): {e}")
+        # return empty Polars DF with no columns (safe fallback)
+        return pl.DataFrame()
 
 # Load once from cache
 t0 = time.perf_counter()
@@ -119,21 +125,19 @@ df = load_data()
 load_ms = (time.perf_counter() - t0) * 1000
 
 # -------------------- Options helpers --------------------
-def get_options(df_pl: pl.DataFrame, col: str) -> list[str]:
-    if col not in df_pl.columns:
-        return ["All"]
-    # Show tidy, unique (case-insensitive) values; we use lowercase helper for dedupe/sort
+def get_options(df_pl: pl.DataFrame, col: str) -> list:
+    """
+    Safely get unique options for a column using the lowercase helper column.
+    Returns ['All', ...sorted unique lower-case values...]
+    """
     lc = f"{col}__lc"
-    if lc not in df_pl.columns:
+    if col not in df_pl.columns or lc not in df_pl.columns:
         return ["All"]
-    # Get unique lower values
+    # get uniques via polars - return python list
     uniques = df_pl.select(pl.col(lc)).unique().to_series().to_list()
     uniques = [v for v in uniques if v]  # drop blanks
     uniques = sorted(uniques)
-    # Display as Title Case for nicer UI (you can change to raw lower if you prefer)
-    display = [u for u in uniques]
-    # First item is "All"
-    return ["All"] + display
+    return ["All"] + uniques
 
 SupplierName_options = get_options(df, "Supplier_Name")
 City_options        = get_options(df, "City")
@@ -218,7 +222,6 @@ for base_col, val in filters:
 # Search ONLY on Concat (lowercase helper)
 if search.strip():
     if "Concat__lc" in filtered_df.columns:
-        # literal=True => no regex cost; case-insensitive via lower helper
         filtered_df = filtered_df.filter(
             pl.col("Concat__lc").str.contains(_lc(search), literal=True)
         )
@@ -230,12 +233,10 @@ drop_cols = [c for c in filtered_df.columns if c.endswith("__lc")]
 to_show = filtered_df.drop(drop_cols + (["Concat"] if "Concat" in filtered_df.columns else []))
 
 # -------------------- Table --------------------
-# Limit rows shown for UI perf. Adjust if you want.
 MAX_SHOW = 2000
 st.dataframe(to_show.head(MAX_SHOW).to_pandas(), use_container_width=True)
 
 # -------------------- Export --------------------
-# Export the FULL filtered result (includes 'Concat')
 if filtered_df.height > 0:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
