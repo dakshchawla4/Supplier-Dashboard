@@ -150,14 +150,14 @@ button .stButton button { color: Black!important; }
 left_col, right_col = st.columns([6, 1])
 with left_col:
     st.markdown("""
-        <div style="background-color: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;">
+        <div style="background-color: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;height:88px">
             <span style='color: #0F1C2E; font-size: 26px; font-weight: bold;'> Supplier Dashboard </span>
         </div>
     """, unsafe_allow_html=True)
 with right_col:
     st.markdown("""<div style="padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>""",
                 unsafe_allow_html=True)
-    st.image("logo.jpg")
+    st.image("logo.jpg",width =100)
 
 # -------------------- Filters & Search (FORM) --------------------
 with st.form("filters_form", clear_on_submit=False):
@@ -242,3 +242,4 @@ st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searc
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+
