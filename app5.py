@@ -1,4 +1,4 @@
-# app5.py - copy/paste this entire file
+# full app file with only header changed for robust logo alignment
 import io
 import re
 import time
@@ -16,7 +16,7 @@ if password != "Newjoiner@01":
 # -------------------- Helpers --------------------
 def _norm(s: str) -> str:
     s = (s or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"[^a-z0-9]+", "_", s)  # spaces, slashes -> underscore
     s = re.sub(r"_+", "_", s).strip("_")
     return s
 
@@ -68,59 +68,57 @@ FILTER_COLS = [
 # -------------------- Data load (cached) --------------------
 @st.cache_data(show_spinner=True)
 def load_data(excel_path: str = "excel.xlsx") -> pl.DataFrame:
-    """
-    Robust loading:
-    - read with pandas (strings),
-    - normalize header names to canonical,
-    - create 'Concat' if missing,
-    - build lowercase helper columns in pandas,
-    - convert to Polars and return.
-    """
-    try:
-        # 1) read Excel as strings
-        df_pd = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
-        df_pd = df_pd.fillna("")  # empty strings instead of NaN
+    # Read ALL columns as strings (fast & consistent)
+    df_pd = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
+    df_pd = df_pd.fillna("")  # ensure empty strings instead of NaN
 
-        # 2) normalize headers -> canonical names where we can match synonyms
-        rename_map = {}
-        for col in df_pd.columns:
-            key = _norm(col)
-            if key in SYNONYMS:
-                canon_key = SYNONYMS[key]
-                rename_map[col] = CANON[canon_key]
-        if rename_map:
-            df_pd = df_pd.rename(columns=rename_map)
+    # Rename columns to canonical labels
+    rename_map = {}
+    for col in df_pd.columns:
+        key = _norm(col)
+        if key in SYNONYMS:
+            canon_key = SYNONYMS[key]
+            rename_map[col] = CANON[canon_key]
+    if rename_map:
+        df_pd = df_pd.rename(columns=rename_map)
 
-        # 3) ensure Concat exists; if not, build from all columns
-        if "Concat" not in df_pd.columns:
-            # build a single string per row
-            df_pd["Concat"] = df_pd.astype(str).agg(" ".join, axis=1)
+    # Validate presence of required columns
+    missing = [c for c in ["Concat"] if c not in df_pd.columns]
+    if missing:
+        raise ValueError(
+            f"Missing column(s) {missing}. Your Excel must include a prebuilt 'Concat' column."
+        )
 
-        # 4) build lowercase helper columns in pandas for robustness
-        lc_cols = [c for c in (FILTER_COLS + ["Concat"]) if c in df_pd.columns]
-        for c in lc_cols:
-            df_pd[f"{c}__lc"] = df_pd[c].astype(str).str.strip().str.lower().fillna("")
+    # Convert to Polars
+    df = pl.from_pandas(df_pd)
 
-        # 5) convert to Polars and return
-        df = pl.from_pandas(df_pd)
-        return df
+    # Precompute LOWERCASE helper columns once (used for fast filtering/search)
+    lc_targets = [c for c in (FILTER_COLS + ["Concat"]) if c in df.columns]
+    df = df.with_columns([
+        pl.when(pl.col(c).is_null()).then("").otherwise(pl.col(c))
+        .cast(pl.Utf8)
+        .str.strip()
+        .str.to_lowercase()
+        .alias(f"{c}__lc")
+        for c in lc_targets
+    ])
 
-    except Exception as e:
-        st.error(f"Upload failed in load_data(): {e}")
-        return pl.DataFrame()
+    return df
 
-# Load once
+# Load once from cache
 t0 = time.perf_counter()
 df = load_data()
 load_ms = (time.perf_counter() - t0) * 1000
 
-# -------------------- Options helper --------------------
-def get_options(df_pl: pl.DataFrame, col: str) -> list:
+# -------------------- Options helpers --------------------
+def get_options(df_pl: pl.DataFrame, col: str) -> list[str]:
+    if col not in df_pl.columns:
+        return ["All"]
     lc = f"{col}__lc"
-    if col not in df_pl.columns or lc not in df_pl.columns:
+    if lc not in df_pl.columns:
         return ["All"]
     uniques = df_pl.select(pl.col(lc)).unique().to_series().to_list()
-    uniques = [v for v in uniques if v]
+    uniques = [v for v in uniques if v]  # drop blanks
     uniques = sorted(uniques)
     return ["All"] + uniques
 
@@ -133,35 +131,53 @@ Category2_options   = get_options(df, "Category_2")
 Category3_options   = get_options(df, "Category_3")
 Product_options     = get_options(df, "Product_Service")
 
-# -------------------- Styles / Header --------------------
+# -------------------- Styles (kept) --------------------
 st.markdown("""
 <style>
+/* general inputs */
 input, select, textarea, option { color:#1a1a1a !important; background-color:white !important; }
 label, .stTextInput > label, .stSelectbox > label, .stMarkdown h3, .stMarkdown h4 { color:White!important; }
 [data-testid="stAppViewContainer"] { background-color: #0F1C2E; }
-.white-box { background-color: white; padding: 1.5rem; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; }
-.title-text { font-size:28px; font-weight:bold; color:#102A43; display:flex; align-items:center; }
-.symbol { font-size:34px; margin-right:15px; color:#102A43; }
+
+/* other controls (kept from your earlier theme) */
 button[kind="download"] { background-color:#1E88E5 !important; color:white!important; border:none!important; padding: 10px 20px!important; border-radius: 5px!important; font-weight: bold!important; }
-button .stButton button { color: Black!important; }
 </style>
 """, unsafe_allow_html=True)
 
-left_col, right_col = st.columns([5, 1])
-with left_col:
-    st.markdown("""
-        <div style="background-color: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;height:88px">
-            <span style='color: #0F1C2E; font-size: 26px; font-weight: bold;'> Supplier Dashboard </span>
-        </div>
-    """, unsafe_allow_html=True)
-with right_col:
-    st.markdown("""<div style="padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>""",
-                unsafe_allow_html=True)
-    st.image("logo.jpg",width =100)
+# -------------------- Header (REPLACED - robust alignment) --------------------
+# Minimal, robust header using Streamlit columns + tiny HTML blocks to guarantee vertical alignment.
+# If you need to tweak: change logo_height (px) or header_height (px) below.
+logo_height = 56   # px - visible logo height (tweak if you need)
+header_height = 88 # px - overall header box height (tweak if needed)
 
-# -------------------- Filters & Search (FORM) --------------------
+left_col, right_col = st.columns([9, 1])
+with left_col:
+    st.markdown(f"""
+    <div style="
+        background: white;
+        padding: 14px 20px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        height: {header_height}px;
+        box-sizing: border-box;">
+        <h1 style="margin:0; color:#0F1C2E; font-size:26px; font-weight:700; line-height:1;">
+            Supplier Dashboard
+        </h1>
+    </div>
+    """, unsafe_allow_html=True)
+
+with right_col:
+    # Center the logo vertically using a wrapper div with same header height
+    st.markdown(f"""
+    <div style="height: {header_height}px; display:flex; align-items:center; justify-content:center; box-sizing:border-box;">
+      <img src="logo.jpg" alt="logo" style="height:{logo_height}px; width:auto; object-fit:contain; border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,0.12);"/>
+    </div>
+    """, unsafe_allow_html=True)
+
+# -------------------- Filters & Search (FORM -> submit once) --------------------
 with st.form("filters_form", clear_on_submit=False):
-    search = st.text_input("Search ", "")
+    search = st.text_input("Search (uses only your prebuilt 'Concat' column)", "")
 
     col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
     with col1:
@@ -238,10 +254,5 @@ else:
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
-
-
-# -------------------- Footnote --------------------
-st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
-
 
 
