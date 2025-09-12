@@ -1,4 +1,3 @@
-# full app file with only header changed for robust logo alignment
 import io
 import re
 import time
@@ -15,11 +14,13 @@ if password != "Newjoiner@01":
 
 # -------------------- Helpers --------------------
 def _norm(s: str) -> str:
+    # normalize a column label to compare across variants
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)  # spaces, slashes -> underscore
     s = re.sub(r"_+", "_", s).strip("_")
     return s
 
+# Canonical targets you want to use in code
 CANON = {
     "supplier_name": "Supplier_Name",
     "city": "City",
@@ -32,23 +33,29 @@ CANON = {
     "concat": "Concat",
 }
 
+# Common synonyms -> canonical key (left side uses our _norm form)
 SYNONYMS = {
+    # supplier
     "supplier_name": "supplier_name",
     "suppliername": "supplier_name",
+    # city/state/location
     "city": "city",
     "state": "state",
     "location": "location",
+    # product/service
     "product_service": "product_service",
     "productservice": "product_service",
     "product_services": "product_service",
     "product": "product_service",
     "service": "product_service",
+    # categories
     "category_1": "category_1",
     "category1": "category_1",
     "category_2": "category_2",
     "category2": "category_2",
     "category_3": "category_3",
     "category3": "category_3",
+    # search column
     "concat": "concat",
     "search_blob": "concat",
     "search": "concat",
@@ -68,6 +75,11 @@ FILTER_COLS = [
 # -------------------- Data load (cached) --------------------
 @st.cache_data(show_spinner=True)
 def load_data(excel_path: str = "excel.xlsx") -> pl.DataFrame:
+    """
+    Read Excel with pandas (strings), normalize column names, create lowercase helper
+    columns (pandas) and then convert to Polars. Doing the lowercase helpers in pandas
+    avoids ExprStringNameSpace / version mismatch issues with some Polars builds.
+    """
     # Read ALL columns as strings (fast & consistent)
     df_pd = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
     df_pd = df_pd.fillna("")  # ensure empty strings instead of NaN
@@ -89,19 +101,14 @@ def load_data(excel_path: str = "excel.xlsx") -> pl.DataFrame:
             f"Missing column(s) {missing}. Your Excel must include a prebuilt 'Concat' column."
         )
 
-    # Convert to Polars
-    df = pl.from_pandas(df_pd)
+    # --- Create lowercase helper columns in pandas (robust across polars versions) ---
+    lc_targets = [c for c in (FILTER_COLS + ["Concat"]) if c in df_pd.columns]
+    for c in lc_targets:
+        # ensure string, strip and lowercase in pandas
+        df_pd[f"{c}__lc"] = df_pd[c].astype(str).str.strip().str.lower()
 
-    # Precompute LOWERCASE helper columns once (used for fast filtering/search)
-    lc_targets = [c for c in (FILTER_COLS + ["Concat"]) if c in df.columns]
-    df = df.with_columns([
-        pl.when(pl.col(c).is_null()).then("").otherwise(pl.col(c))
-        .cast(pl.Utf8)
-        .str.strip()
-        .str.to_lowercase()
-        .alias(f"{c}__lc")
-        for c in lc_targets
-    ])
+    # Convert to Polars (now has the helper columns already)
+    df = pl.from_pandas(df_pd)
 
     return df
 
@@ -111,16 +118,21 @@ df = load_data()
 load_ms = (time.perf_counter() - t0) * 1000
 
 # -------------------- Options helpers --------------------
-def get_options(df_pl: pl.DataFrame, col: str) -> list[str]:
+def get_options(df_pl: pl.DataFrame, col: str) -> list:
     if col not in df_pl.columns:
         return ["All"]
+    # Show tidy, unique (case-insensitive) values; we use lowercase helper for dedupe/sort
     lc = f"{col}__lc"
     if lc not in df_pl.columns:
         return ["All"]
+    # Get unique lower values
     uniques = df_pl.select(pl.col(lc)).unique().to_series().to_list()
     uniques = [v for v in uniques if v]  # drop blanks
     uniques = sorted(uniques)
-    return ["All"] + uniques
+    # Display as Title Case for nicer UI (you can change to raw lower if you prefer)
+    display = [u for u in uniques]
+    # First item is "All"
+    return ["All"] + display
 
 SupplierName_options = get_options(df, "Supplier_Name")
 City_options        = get_options(df, "City")
@@ -131,49 +143,31 @@ Category2_options   = get_options(df, "Category_2")
 Category3_options   = get_options(df, "Category_3")
 Product_options     = get_options(df, "Product_Service")
 
-# -------------------- Styles (kept) --------------------
+# -------------------- Styles / Header --------------------
 st.markdown("""
 <style>
-/* general inputs */
 input, select, textarea, option { color:#1a1a1a !important; background-color:white !important; }
 label, .stTextInput > label, .stSelectbox > label, .stMarkdown h3, .stMarkdown h4 { color:White!important; }
 [data-testid="stAppViewContainer"] { background-color: #0F1C2E; }
-
-/* other controls (kept from your earlier theme) */
+.white-box { background-color: white; padding: 1.5rem; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; }
+.title-text { font-size:28px; font-weight:bold; color:#102A43; display:flex; align-items:center; }
+.symbol { font-size:34px; margin-right:15px; color:#102A43; }
 button[kind="download"] { background-color:#1E88E5 !important; color:white!important; border:none!important; padding: 10px 20px!important; border-radius: 5px!important; font-weight: bold!important; }
+button .stButton button { color: Black!important; }
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------- Header (REPLACED - robust alignment) --------------------
-# Minimal, robust header using Streamlit columns + tiny HTML blocks to guarantee vertical alignment.
-# If you need to tweak: change logo_height (px) or header_height (px) below.
-logo_height = 56   # px - visible logo height (tweak if you need)
-header_height = 88 # px - overall header box height (tweak if needed)
-
-left_col, right_col = st.columns([9, 1])
+left_col, right_col = st.columns([6, 1])
 with left_col:
-    st.markdown(f"""
-    <div style="
-        background: white;
-        padding: 14px 20px;
-        border-radius: 10px;
-        display: flex;
-        align-items: center;
-        height: {header_height}px;
-        box-sizing: border-box;">
-        <h1 style="margin:0; color:#0F1C2E; font-size:26px; font-weight:700; line-height:1;">
-            Supplier Dashboard
-        </h1>
-    </div>
+    st.markdown("""
+        <div style="background-color: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;">
+            <span style='color: #0F1C2E; font-size: 26px; font-weight: bold;'> Supplier Dashboard </span>
+        </div>
     """, unsafe_allow_html=True)
-
 with right_col:
-    # Center the logo vertically using a wrapper div with same header height
-    st.markdown(f"""
-    <div style="height: {header_height}px; display:flex; align-items:center; justify-content:center; box-sizing:border-box;">
-      <img src="logo.jpg" alt="logo" style="height:{logo_height}px; width:auto; object-fit:contain; border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,0.12);"/>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("""<div style="padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>""",
+                unsafe_allow_html=True)
+    st.image("logo.jpg", width=100)
 
 # -------------------- Filters & Search (FORM -> submit once) --------------------
 with st.form("filters_form", clear_on_submit=False):
@@ -205,6 +199,7 @@ def _lc(s: str) -> str:
 
 filtered_df = df
 
+# Per-filter equality on lowercase helper columns
 filters = [
     ("Supplier_Name", supplierName_filter),
     ("City", City_filter),
@@ -222,6 +217,7 @@ for base_col, val in filters:
 # Search ONLY on Concat (lowercase helper)
 if search.strip():
     if "Concat__lc" in filtered_df.columns:
+        # literal=True => no regex cost; case-insensitive via lower helper
         filtered_df = filtered_df.filter(
             pl.col("Concat__lc").str.contains(_lc(search), literal=True)
         )
@@ -233,10 +229,12 @@ drop_cols = [c for c in filtered_df.columns if c.endswith("__lc")]
 to_show = filtered_df.drop(drop_cols + (["Concat"] if "Concat" in filtered_df.columns else []))
 
 # -------------------- Table --------------------
+# Limit rows shown for UI perf. Adjust if you want.
 MAX_SHOW = 2000
 st.dataframe(to_show.head(MAX_SHOW).to_pandas(), use_container_width=True)
 
 # -------------------- Export --------------------
+# Export the FULL filtered result (includes 'Concat')
 if filtered_df.height > 0:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -254,5 +252,7 @@ else:
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+
+
 
 
