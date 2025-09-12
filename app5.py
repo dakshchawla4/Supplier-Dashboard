@@ -147,7 +147,7 @@ button .stButton button { color: Black!important; }
 </style>
 """, unsafe_allow_html=True)
 
-left_col, right_col = st.columns([6, 2])
+left_col, right_col = st.columns([5, 1])
 with left_col:
     st.markdown("""
         <div style="background-color: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;height:88px">
@@ -242,5 +242,6 @@ st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searc
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+
 
 
