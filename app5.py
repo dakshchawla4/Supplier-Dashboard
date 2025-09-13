@@ -251,7 +251,8 @@ else:
     st.info("No data to export. Please adjust your filters or search.")
 
 # -------------------- Footnote --------------------
-st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset")
+
 
 
 
