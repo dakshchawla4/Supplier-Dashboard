@@ -165,7 +165,7 @@ with left_col:
         </div>
     """, unsafe_allow_html=True)
 with right_col:
-    st.markdown("""<div style="padding: 10px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>""",
+    st.markdown("""<div style=" border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center;"></div>""",
                 unsafe_allow_html=True)
     st.image("logo.jpg", width=100)
 
@@ -252,6 +252,7 @@ else:
 
 # -------------------- Footnote --------------------
 st.caption(f"Data loaded in ~{load_ms:.0f} ms • Using cached dataset • Searching only 'Concat'")
+
 
 
 
